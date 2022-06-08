@@ -105,7 +105,7 @@ Another way to fix this issue is using a dedicated WebDav client for Windows, su
 Examples / Getting started
 --------------------------
 
-1. Install ``djangodav`` from this repo: ``pip install git+https://github.com/anx-ckreuzberger/djangodav``
+1. Install ``djangodav`` from this repo: ``pip install git+https://github.com/felipeNz/djangodav``
 
 2. Add ``djangodav`` and ``rest_framework`` to your ``INSTALLED_APPS``:
 
@@ -130,11 +130,27 @@ This will just host the provided directory ``/path/to/folder``, without any perm
 .. code:: python
 
     from djangodav.base.resources import MetaEtagMixIn
-    from djangodav.fs.resources import DummyFSDAVResource
+    from djangodav.fs.resources import BaseFSDavResource
 
-    class MyFSDavResource(MetaEtagMixIn, DummyFSDAVResource):
+    class MyFSDavResource(MetaEtagMixIn, BaseFSDavResource):
         root = '/path/to/folder'
 
+        def read(self):
+            return open(self.get_abs_path(), 'rb')
+
+        def write(self, request, temp_file=None, range_start=None):
+            if temp_file:
+                # move temp file (e.g., coming from nginx)
+                shutil.move(temp_file, self.get_abs_path())
+            elif range_start == None:
+                # open binary file and write to disk
+                with open(self.get_abs_path(), 'wb') as dst:
+                    shutil.copyfileobj(request, dst)
+            else:
+                # open binary file and write to disk
+                with open(self.get_abs_path(), 'r+b') as dst:
+                    dst.seek(range_start)
+                    shutil.copyfileobj(request, dst)
 
 2. Register WebDav view in urls.py
 
@@ -144,15 +160,15 @@ This will just host the provided directory ``/path/to/folder``, without any perm
     from djangodav.locks import DummyLock
     from djangodav.views import DavView
 
-    from django.conf.urls import patterns
+    from django.urls import re_path
 
     from .resource import MyFSDavResource
 
     # include fsdav/webdav without trailing slash (do not use a slash like in 'fsdav/(?P<path>.*)$')
-    urlpatterns = patterns('',
-        (r'^fsdav(?P<path>.*)$', DavView.as_view(resource_class=MyFSDavResource, lock_class=DummyLock,
-         acl_class=FullAcl)),
-    )
+    urlpatterns += 
+        re_path(r'^fsdav(?P<path>.*)$', DavView.as_view(resource_class=MyFSDavResource, lock_class=DummyLock,
+         acl_class=FullAcl))
+    
 
 
 Example 2: Create a simple database webdav resource
@@ -274,12 +290,12 @@ This example is a bit more complex, as it requires two Django models and some ha
     from djangodav.locks import DummyLock
     from djangodav.views import DavView
 
-    from django.conf.urls import patterns
+    from django.urls import re_path
 
     from .resource import MyDBDavResource
 
     # include fsdav/webdav without trailing slash (do not use a slash like in 'dbdav/(?P<path>.*)$')
-    urlpatterns = patterns('',
-        (r'^dbdav(?P<path>.*)$', DavView.as_view(resource_class=MyFSDavResource, lock_class=DummyLock,
+    urlpatterns += 
+        re_path(r'^dbdav(?P<path>.*)$', DavView.as_view(resource_class=MyFSDavResource, lock_class=DummyLock,
          acl_class=FullAcl)),
     )
