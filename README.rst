@@ -40,12 +40,8 @@ Development & Contributions
 Contributions within this repository
 ------------------------------------
 
-- Cleanup
-- Django 1.11+ compatibility
-- Python3 compatibility
-- Replaced `vulnerable lxml.etree.parse function <https://blog.python.org/2013/02/announcing-defusedxml-fixes-for-xml.html>`_ with ``defusedxml.lxml.parse``
-- Documentation
-- Pep8/Pycodestyle fixes
+- Changed from "django.utils.http import urlquote" to "urllib.parse import quote"
+- Changed example to use re_path
 
 
 Original Source
@@ -100,7 +96,11 @@ Windows enforces a 47 MB limit on WebDav files. See `this issue on Microsoft Ans
 aswell as `this issue on StackExchange <https://sharepoint.stackexchange.com/questions/119302/error-0x800700df-the-file-size-exceeds-the-limit-allowed-and-cannot-be-saved>`_.
 It can be fixed by increasing the registry parameter ``FileSizeLimitInBytes`` in ``HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WebClient\Parameters`` to ``4294967295``.
 
-Another way to fix this issue is using a dedicated WebDav client for Windows, such as `RaiDrive <https://www.raidrive.com/>`_.
+Mapping a Windows Drive
+~~~~~~~~~~~~~~~~~~~~~~~
+
+You'll need to be hosting on SSL, and the root certificate of your certificate provider will need to be installed on Windows.  The root for LetsEncrypt is not installed.
+Once that's done, map the network drive to \\url@SSL\fsdav 
 
 Examples / Getting started
 --------------------------
