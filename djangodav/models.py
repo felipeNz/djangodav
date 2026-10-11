@@ -21,3 +21,25 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
+from hashlib import sha256
+
+from django.db import models
+
+
+class DeadProperty(models.Model):
+    key = models.CharField(max_length=64, primary_key=True)
+    resource_key = models.CharField(max_length=64, db_index=True)
+    scope = models.TextField()
+    path = models.TextField()
+    name = models.TextField()
+    value = models.TextField()
+
+    @staticmethod
+    def resource_key_for(scope, path):
+        identity = '%s\0%s' % (scope, path)
+        return sha256(identity.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def key_for(cls, scope, path, name):
+        identity = '%s\0%s' % (cls.resource_key_for(scope, path), name)
+        return sha256(identity.encode('utf-8')).hexdigest()

@@ -78,6 +78,11 @@ Added FSResource and DBResource to provide file system and data base access.
 XML parsing uses defusedxml, and XML responses are generated with Python's standard
 ElementTree library.
 
+Dead WebDAV properties are stored in the ``DeadProperty`` model. Apply Django
+migrations to create its table. Property storage is scoped by resource class by
+default; if the same resource class serves multiple DAV roots, give each view a
+distinct ``property_scope``.
+
 
 Known Issues / Limitations
 --------------------------

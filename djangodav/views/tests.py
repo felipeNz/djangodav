@@ -23,14 +23,16 @@
 # along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
 from django.http import HttpResponse, HttpRequest, Http404
 from defusedxml.common import EntitiesForbidden
+from xml.etree import ElementTree
 from djangodav.acls import FullAcl
 from djangodav.locks import DummyLock
 from djangodav.responses import ResponseException
 from djangodav.base.tests.resources import MockCollection, MockObject, MissingMockCollection, MissingMockObject
 from djangodav.fs.tests import *
-from djangodav.utils import D, rfc1123_date, serialize_xml
+from djangodav.utils import D, WEBDAV_NS, rfc1123_date, serialize_xml
 from djangodav.views import DavView
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from djangodav.models import DeadProperty
 
 
 class TestView(TestCase):
@@ -295,14 +297,172 @@ class TestView(TestCase):
             base_url='/base/',
             request=request,
             acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+            property_scope='proppatch-tests',
         )
         view.__dict__['resource'] = self.sub_object
-        xbody = D.propertyupdate(D.set(D.prop(D.displayname('updated'))))
+        prop = ElementTree.Element('{urn:example}color')
+        prop.text = 'blue'
+        xbody = D.propertyupdate(D.set(D.prop(prop)))
 
         response = view.proppatch(request, '/collection/sub_object', xbody)
 
         self.assertEqual(response.status_code, 207)
-        self.assertIn(b'<D:prop>{DAV:}displayname</D:prop>', response.content)
+        document = ElementTree.fromstring(response.content)
+        self.assertIsNotNone(document.find('.//{urn:example}color'))
+
+        self.sub_object.get_descendants.return_value = [self.sub_object]
+        propfind = D.propfind(D.prop(ElementTree.Element('{urn:example}color')))
+        response = view.propfind(request, '/collection/sub_object', propfind)
+        document = ElementTree.fromstring(response.content)
+        saved_prop = document.find('.//{urn:example}color')
+        self.assertIsNotNone(saved_prop)
+        self.assertEqual(saved_prop.text, 'blue')
+
+        response = view.propfind(request, '/collection/sub_object', D.propfind(D.allprop()))
+        document = ElementTree.fromstring(response.content)
+        saved_prop = document.find('.//{urn:example}color')
+        self.assertIsNotNone(saved_prop)
+        self.assertEqual(saved_prop.text, 'blue')
+
+        response = view.propfind(request, '/collection/sub_object', D.propfind(D.propname()))
+        document = ElementTree.fromstring(response.content)
+        self.assertIsNotNone(document.find('.//{urn:example}color'))
+        self.assertIsNone(document.find('.//{urn:example}color').text)
+
+    def test_proppatch_remove_dead_property(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            base_url='/base/',
+            request=request,
+            acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+            property_scope='proppatch-tests',
+        )
+        view.__dict__['resource'] = self.sub_object
+        prop = ElementTree.Element('{urn:example}color')
+        prop.text = 'blue'
+        view.proppatch(request, '/collection/sub_object', D.propertyupdate(D.set(D.prop(prop))))
+
+        response = view.proppatch(
+            request,
+            '/collection/sub_object',
+            D.propertyupdate(D.remove(D.prop(ElementTree.Element('{urn:example}color')))),
+        )
+
+        self.assertEqual(response.status_code, 207)
+        self.sub_object.get_descendants.return_value = [self.sub_object]
+        propfind = D.propfind(D.prop(ElementTree.Element('{urn:example}color')))
+        response = view.propfind(request, '/collection/sub_object', propfind)
+        document = ElementTree.fromstring(response.content)
+        statuses = [status.text for status in document.findall('.//{DAV:}status')]
+        self.assertIn('HTTP/1.1 404 Not Found', statuses)
+
+    def test_proppatch_protected_property_is_atomic(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            base_url='/base/',
+            request=request,
+            acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+            property_scope='proppatch-tests',
+        )
+        view.__dict__['resource'] = self.sub_object
+        prop = ElementTree.Element('{urn:example}color')
+        prop.text = 'blue'
+        update = D.propertyupdate(
+            D.set(D.prop(prop)),
+            D.set(D.prop(ElementTree.Element('{DAV:}getetag'))),
+        )
+
+        response = view.proppatch(request, '/collection/sub_object', update)
+
+        self.assertEqual(response.status_code, 207)
+        self.assertIn(b'HTTP/1.1 403 Forbidden', response.content)
+        self.assertIn(b'HTTP/1.1 424 Failed Dependency', response.content)
+        self.sub_object.get_descendants.return_value = [self.sub_object]
+        propfind = D.propfind(D.prop(ElementTree.Element('{urn:example}color')))
+        response = view.propfind(request, '/collection/sub_object', propfind)
+        document = ElementTree.fromstring(response.content)
+        statuses = [status.text for status in document.findall('.//{DAV:}status')]
+        self.assertIn('HTTP/1.1 404 Not Found', statuses)
+
+    def test_proppatch_rolls_back_on_storage_error(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            request=request,
+            acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+            property_scope='proppatch-tests',
+        )
+        view.__dict__['resource'] = self.sub_object
+        first = ElementTree.Element('{urn:example}first')
+        second = ElementTree.Element('{urn:example}second')
+
+        from django.db.models.query import QuerySet
+        original_update_or_create = QuerySet.update_or_create
+        call_count = 0
+
+        def fail_second_update(queryset, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError('simulated property-store failure')
+            return original_update_or_create(queryset, *args, **kwargs)
+
+        with patch.object(QuerySet, 'update_or_create', autospec=True, side_effect=fail_second_update):
+            with self.assertRaisesRegex(RuntimeError, 'simulated property-store failure'):
+                view.proppatch(
+                    request,
+                    '/collection/sub_object',
+                    D.propertyupdate(
+                        D.set(D.prop(first)),
+                        D.set(D.prop(second)),
+                    ),
+                )
+
+        resource_key = DeadProperty.resource_key_for(
+            'proppatch-tests', self.sub_object.get_path()
+        )
+        self.assertFalse(DeadProperty.objects.filter(resource_key=resource_key).exists())
+
+    def test_proppatch_rejects_invalid_body(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            request=request,
+            acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+        )
+        view.__dict__['resource'] = self.sub_object
+
+        response = view.proppatch(request, '/collection/sub_object', None)
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_proppatch_response_propstat_order(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            base_url='/base/',
+            request=request,
+            acl_class=FullAcl,
+            resource_class=self.sub_object.__class__,
+            property_scope='proppatch-tests',
+        )
+        view.__dict__['resource'] = self.sub_object
+        prop = ElementTree.Element('{urn:example}color')
+
+        response = view.proppatch(
+            request,
+            '/collection/sub_object',
+            D.propertyupdate(D.set(D.prop(prop))),
+        )
+        document = ElementTree.fromstring(response.content)
+        propstat = document.find('.//{DAV:}propstat')
+
+        self.assertEqual(
+            [child.tag for child in propstat],
+            ['{DAV:}prop', '{DAV:}status'],
+        )
 
     def test_allowed_object(self):
         v = DavView()

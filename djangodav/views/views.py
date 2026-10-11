@@ -1,8 +1,11 @@
 import os
 import re
+from collections import OrderedDict
+from xml.etree import ElementTree
 
 # import urllib.parse
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import router, transaction
 
 try:
     # Python 2.7
@@ -27,7 +30,8 @@ from django.views.generic import TemplateView
 from djangodav.responses import HttpResponsePreconditionFailed, HttpResponseCreated, HttpResponseNoContent, \
     HttpResponseConflict, HttpResponseMediatypeNotSupported, HttpResponseBadGateway, HttpResponseMultiStatus, \
     HttpResponseLocked, ResponseException
-from djangodav.utils import D, url_join, get_property_tag_list, rfc1123_date, \
+from djangodav.models import DeadProperty
+from djangodav.utils import D, WEBDAV_NS, url_join, get_property_tag_list, rfc1123_date, \
     rfc5987_content_disposition, serialize_xml, local_name, findall_dav, find_dav
 
 
@@ -51,6 +55,7 @@ class DavView(TemplateView):
 
     xml_pretty_print = False
     xml_encoding = 'utf-8'
+    property_scope = None
 
     def no_access(self):
         return HttpResponseForbidden()
@@ -144,6 +149,22 @@ class DavView(TemplateView):
     @cached_property
     def resource(self):
         return self.get_resource(path=self.path)
+
+    def get_property_scope(self):
+        if self.property_scope is not None:
+            return self.property_scope
+        resource_class = self.resource_class or self.resource.__class__
+        return '%s.%s' % (resource_class.__module__, resource_class.__qualname__)
+
+    def get_dead_properties(self, resource):
+        resource_key = DeadProperty.resource_key_for(
+            self.get_property_scope(), resource.get_path()
+        )
+        alias = router.db_for_read(DeadProperty)
+        return {
+            prop.name: ElementTree.fromstring(prop.value)
+            for prop in DeadProperty.objects.using(alias).filter(resource_key=resource_key)
+        }
 
     def get_resource(self, **kwargs):
         return self.resource_class(**self.get_resource_kwargs(**kwargs))
@@ -515,7 +536,7 @@ class DavView(TemplateView):
 
         get_all_props, get_prop, get_prop_names = True, False, False
         if xbody:
-            get_prop = [local_name(p) for p in findall_dav(xbody, 'D:propfind/D:prop/*')]
+            get_prop = [p.tag for p in findall_dav(xbody, 'D:propfind/D:prop/*')]
             get_all_props = findall_dav(xbody, 'D:propfind/D:allprop')
             get_prop_names = findall_dav(xbody, 'D:propfind/D:propname')
             if int(bool(get_prop)) + int(bool(get_all_props)) + int(bool(get_prop_names)) != 1:
@@ -523,32 +544,47 @@ class DavView(TemplateView):
 
         children = self.resource.get_descendants(depth=self.get_depth())
 
-        if get_prop_names:
-            responses = [
-                D.response(
-                    D.href(url_join(self.base_url, child.get_escaped_path())),
-                    D.propstat(
-                        D.prop(*[
-                            D(name) for name in child.ALL_PROPS
-                        ]),
-                        D.status('HTTP/1.1 200 OK'),
-                    ),
-                )
-                for child in children
-            ]
-        else:
-            responses = [
-                D.response(
-                    D.href(url_join(self.base_url, child.get_escaped_path())),
-                    D.propstat(
-                        D.prop(
-                            *get_property_tag_list(child, *(get_prop if get_prop else child.ALL_PROPS))
-                        ),
-                        D.status('HTTP/1.1 200 OK'),
-                    ),
-                )
-                for child in children
-            ]
+        responses = []
+        for child in children:
+            dead_properties = self.get_dead_properties(child)
+            live_names = ['{%s}%s' % (WEBDAV_NS, name) for name in child.ALL_PROPS]
+            requested_names = get_prop if get_prop else live_names + list(dead_properties)
+            found = []
+            missing = []
+            for name in requested_names:
+                if name in dead_properties:
+                    prop = dead_properties[name]
+                    found.append(ElementTree.Element(prop.tag) if get_prop_names else prop)
+                elif name.startswith('{%s}' % WEBDAV_NS):
+                    live_name = name.split('}', 1)[1]
+                    if live_name in child.ALL_PROPS:
+                        prop = get_property_tag_list(child, live_name)
+                        if prop:
+                            found.append(
+                                ElementTree.Element(name) if get_prop_names else prop[0]
+                            )
+                        elif get_prop:
+                            missing.append(ElementTree.Element(name))
+                    else:
+                        missing.append(ElementTree.Element(name))
+                else:
+                    missing.append(ElementTree.Element(name))
+
+            propstats = []
+            if found:
+                propstats.append(D.propstat(
+                    D.prop(*found),
+                    D.status('HTTP/1.1 200 OK'),
+                ))
+            if missing:
+                propstats.append(D.propstat(
+                    D.prop(*missing),
+                    D.status('HTTP/1.1 404 Not Found'),
+                ))
+            responses.append(D.response(
+                D.href(url_join(self.base_url, child.get_escaped_path())),
+                *propstats
+            ))
 
         body = D.multistatus(*responses)
         return self.build_xml_response(body, HttpResponseMultiStatus)
@@ -561,16 +597,84 @@ class DavView(TemplateView):
         depth = self.get_depth(default="0")
         if depth != 0:
             return HttpResponseBadRequest('Invalid depth header value %s' % depth)
-        props = findall_dav(xbody, 'D:propertyupdate/D:set/D:prop/*')
-        body = D.multistatus(
-            D.response(
-                D.href(url_join(self.base_url, self.resource.get_escaped_path())),
-                *[D.propstat(
-                    D.status('HTTP/1.1 200 OK'),
-                    D.prop(el.tag)
-                ) for el in props]
-            )
+        dav_propertyupdate = '{%s}propertyupdate' % WEBDAV_NS
+        dav_set = '{%s}set' % WEBDAV_NS
+        dav_remove = '{%s}remove' % WEBDAV_NS
+        dav_prop = '{%s}prop' % WEBDAV_NS
+        if xbody is None or xbody.tag != dav_propertyupdate:
+            return HttpResponseBadRequest('A DAV:propertyupdate body is required.')
+
+        instructions = []
+        for instruction in list(xbody):
+            if instruction.tag not in (dav_set, dav_remove) or len(instruction) != 1:
+                return HttpResponseBadRequest('Invalid PROPPATCH instruction.')
+            properties = instruction[0]
+            if properties.tag != dav_prop or not len(properties):
+                return HttpResponseBadRequest('Each instruction requires DAV:prop properties.')
+            operation = 'set' if instruction.tag == dav_set else 'remove'
+            for prop in properties:
+                if not isinstance(prop.tag, str):
+                    return HttpResponseBadRequest('Invalid property name.')
+                instructions.append((operation, prop))
+
+        if not instructions:
+            return HttpResponseBadRequest('At least one property instruction is required.')
+
+        protected = set(self.resource.LIVE_PROPERTIES)
+        failed = any(
+            prop.tag in protected or
+            (prop.tag.startswith('{%s}' % WEBDAV_NS) and
+             prop.tag.split('}', 1)[1] in self.resource.ALL_PROPS)
+            for _, prop in instructions
         )
+        statuses = OrderedDict()
+        if failed:
+            for _, prop in instructions:
+                status = 403 if (
+                    prop.tag in protected or
+                    (prop.tag.startswith('{%s}' % WEBDAV_NS) and
+                     prop.tag.split('}', 1)[1] in self.resource.ALL_PROPS)
+                ) else 424
+                statuses.setdefault(status, []).append(ElementTree.Element(prop.tag))
+        else:
+            scope = self.get_property_scope()
+            path = self.resource.get_path()
+            resource_key = DeadProperty.resource_key_for(scope, path)
+            alias = router.db_for_write(DeadProperty)
+            with transaction.atomic(using=alias):
+                for operation, prop in instructions:
+                    key = DeadProperty.key_for(scope, path, prop.tag)
+                    if operation == 'set':
+                        DeadProperty.objects.using(alias).update_or_create(
+                            key=key,
+                            defaults={
+                                'resource_key': resource_key,
+                                'scope': scope,
+                                'path': path,
+                                'name': prop.tag,
+                                'value': ElementTree.tostring(prop, encoding='unicode'),
+                            },
+                        )
+                    else:
+                        DeadProperty.objects.using(alias).filter(key=key).delete()
+            statuses[200] = [ElementTree.Element(prop.tag) for _, prop in instructions]
+
+        status_text = {
+            200: 'OK',
+            403: 'Forbidden',
+            424: 'Failed Dependency',
+        }
+        propstats = [
+            D.propstat(
+                D.prop(*props),
+                D.status('HTTP/1.1 %d %s' % (status, status_text[status])),
+            )
+            for status, props in statuses.items()
+        ]
+        body = D.multistatus(D.response(
+            D.href(url_join(self.base_url, self.resource.get_escaped_path())),
+            *propstats
+        ))
         return self.build_xml_response(body, HttpResponseMultiStatus)
 
     def build_xml_response(self, tree=None, response_class=HttpResponse, **kwargs):
