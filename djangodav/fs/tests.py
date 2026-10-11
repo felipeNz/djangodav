@@ -23,7 +23,7 @@
 # along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
 from django.test import TestCase
 from djangodav.fs.resources import BaseFSDavResource
-from mock import patch
+from unittest.mock import patch
 
 
 class TestFSDavResource(TestCase):

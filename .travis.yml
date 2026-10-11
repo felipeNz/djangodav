@@ -1,11 +1,9 @@
 language: python
 python:
-  - "2.7"
-  - "3.4"
-  - "3.5"
-  - "3.6"
+  - "3.12"
+  - "3.13"
+  - "3.14"
 env:
-  - DJANGO_VERSION=1.11
-  - DJANGO_VERSION=2.0
-install: pip install -q Django==$DJANGO_VERSION djangorestframework>=3.6,<3.8
-script: python setup.py test
+  - DJANGO_VERSION=6.1
+install: pip install -q Django==$DJANGO_VERSION "djangorestframework>=3.16"
+script: python runtests.py

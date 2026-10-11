@@ -40,9 +40,11 @@ DEFAULT_SETTINGS = dict(
             ENGINE = 'django.db.backends.sqlite3'
         )
     ),
-    ROOT_URLCONF = 'djangodav.tests.urls',
-    MIDDLEWARE_CLASSES = ()
+    ROOT_URLCONF = 'runtests',
+    MIDDLEWARE = ()
 )
+
+urlpatterns = []
 
 
 def runtests(*test_args):

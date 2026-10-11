@@ -3,10 +3,7 @@ from base64 import b64encode
 
 from django.test import TestCase
 from django.test.client import RequestFactory
-try:
-    from django.utils.unittest import skipUnless
-except ImportError:
-    from unittest import skipUnless
+from unittest import skipUnless
 
 from djangodav.views import DavView
 from djangodav.fs.resources import DummyReadFSDavResource

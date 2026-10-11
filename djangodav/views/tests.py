@@ -21,19 +21,16 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
-from lxml.etree import ElementTree
 from django.http import HttpResponse, HttpRequest, Http404
+from defusedxml.common import EntitiesForbidden
 from djangodav.acls import FullAcl
 from djangodav.locks import DummyLock
 from djangodav.responses import ResponseException
-# ToDo: do not use lxml, use defusedxml to avoid XML vulnerabilities
-from lxml import etree
-
 from djangodav.base.tests.resources import MockCollection, MockObject, MissingMockCollection, MissingMockObject
 from djangodav.fs.tests import *
-from djangodav.utils import D, WEBDAV_NSMAP, rfc1123_date
+from djangodav.utils import D, rfc1123_date, serialize_xml
 from djangodav.views import DavView
-from mock import Mock
+from unittest.mock import Mock
 
 
 class TestView(TestCase):
@@ -106,7 +103,7 @@ class TestView(TestCase):
         resp = v.propfind(request, path, None)
         self.assertEqual(resp.status_code, 207)
         self.assertEqual(resp.content,
-            etree.tostring(D.multistatus(
+            serialize_xml(D.multistatus(
                 D.response(
                     D.href('/base/collection/sub_object'),
                     D.propstat(
@@ -146,7 +143,7 @@ class TestView(TestCase):
                         D.status("HTTP/1.1 200 OK")
                     )
                 ),
-            ), pretty_print=True, xml_declaration=True, encoding='utf-8')
+            ), pretty_print=True)
         )
 
     def test_propfind_exact_names(self):
@@ -156,18 +153,16 @@ class TestView(TestCase):
         v = DavView(base_url='/base/', path=path, request=request, acl_class=FullAcl, xml_pretty_print=True)
         v.__dict__['resource'] = self.sub_object
         resp = v.propfind(request, path,
-            etree.XPathDocumentEvaluator(ElementTree(
-                D.propfind(
-                    D.prop(
-                        D.displayname(),
-                        D.resourcetype(),
-                    )
+            D.propfind(
+                D.prop(
+                    D.displayname(),
+                    D.resourcetype(),
                 )
-            ), namespaces=WEBDAV_NSMAP)
+            )
         )
         self.assertEqual(resp.status_code, 207)
         self.assertEqual(resp.content,
-            etree.tostring(D.multistatus(
+            serialize_xml(D.multistatus(
                 D.response(
                     D.href('/base/collection/sub_object'),
                     D.propstat(
@@ -178,7 +173,7 @@ class TestView(TestCase):
                         D.status("HTTP/1.1 200 OK")
                     )
                 ),
-            ), pretty_print=True, xml_declaration=True, encoding='utf-8')
+            ), pretty_print=True)
         )
 
     def test_propfind_allprop(self):
@@ -188,15 +183,13 @@ class TestView(TestCase):
         v = DavView(base_url='/base/', path=path, request=request, acl_class=FullAcl, xml_pretty_print=True)
         v.__dict__['resource'] = self.sub_object
         resp = v.propfind(request, path,
-            etree.XPathDocumentEvaluator(ElementTree(
-                D.propfind(
-                    D.allprop()
-                )
-            ), namespaces=WEBDAV_NSMAP)
+            D.propfind(
+                D.allprop()
+            )
         )
         self.assertEqual(resp.status_code, 207)
         self.assertEqual(resp.content,
-            etree.tostring(D.multistatus(
+            serialize_xml(D.multistatus(
                 D.response(
                     D.href('/base/collection/sub_object'),
                     D.propstat(
@@ -210,7 +203,7 @@ class TestView(TestCase):
                         D.status("HTTP/1.1 200 OK")
                     )
                 ),
-            ), pretty_print=True, xml_declaration=True, encoding='utf-8')
+            ), pretty_print=True)
         )
 
 
@@ -221,15 +214,13 @@ class TestView(TestCase):
         v = DavView(base_url='/base/', path=path, request=request, acl_class=FullAcl, xml_pretty_print=True)
         v.__dict__['resource'] = self.sub_object
         resp = v.propfind(request, path,
-            etree.XPathDocumentEvaluator(ElementTree(
-                D.propfind(
-                    D.propname()
-                )
-            ), namespaces=WEBDAV_NSMAP)
+            D.propfind(
+                D.propname()
+            )
         )
         self.assertEqual(resp.status_code, 207)
         self.assertEqual(resp.content,
-            etree.tostring(D.multistatus(
+            serialize_xml(D.multistatus(
                 D.response(
                     D.href('/base/collection/sub_object'),
                     D.propstat(
@@ -243,7 +234,7 @@ class TestView(TestCase):
                         D.status("HTTP/1.1 200 OK")
                     )
                 ),
-            ), pretty_print=True, xml_declaration=True, encoding='utf-8')
+            ), pretty_print=True)
         )
 
     def test_dispatch(self):
@@ -262,6 +253,56 @@ class TestView(TestCase):
         self.assertIsNotNone(v.xbody)
         self.assertEqual(v.base_url, '/base')
         self.assertEqual(v.path, '/path/')
+
+    def test_dispatch_rejects_xml_entities(self):
+        payload = b'<!DOCTYPE foo [<!ENTITY x "unsafe">]><foo>&x;</foo>'
+        request = Mock(
+            spec=HttpRequest,
+            META={
+                'PATH_INFO': '/path/',
+                'CONTENT_TYPE': 'text/xml',
+                'CONTENT_LENGTH': str(len(payload)),
+            },
+            method='PROPFIND',
+            read=Mock(return_value=payload),
+        )
+        view = DavView(request=request, _allowed_methods=Mock(return_value=['PROPFIND']))
+
+        with self.assertRaises(EntitiesForbidden):
+            view.dispatch(request, '/path/')
+
+    def test_lock_parses_dav_xml(self):
+        request = Mock(META={'HTTP_DEPTH': '0', 'HTTP_LOCK_TIMEOUT': 'Seconds-600'})
+        lock = Mock()
+        lock.acquire.return_value = 'token'
+        view = DavView(acl_class=FullAcl, lock_class=Mock(return_value=lock))
+        view.__dict__['resource'] = self.sub_object
+        xbody = D.lockinfo(
+            D.lockscope(D.exclusive()),
+            D.locktype(D.write()),
+            D.owner('user'),
+        )
+
+        response = view.lock(request, '/collection/sub_object', xbody)
+
+        lock.acquire.assert_called_once_with('exclusive', 'write', 0, 600, 'user')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'<D:activelock ', response.content)
+
+    def test_proppatch_parses_dav_xml(self):
+        request = Mock(META={'HTTP_DEPTH': '0'})
+        view = DavView(
+            base_url='/base/',
+            request=request,
+            acl_class=FullAcl,
+        )
+        view.__dict__['resource'] = self.sub_object
+        xbody = D.propertyupdate(D.set(D.prop(D.displayname('updated'))))
+
+        response = view.proppatch(request, '/collection/sub_object', xbody)
+
+        self.assertEqual(response.status_code, 207)
+        self.assertIn(b'<D:prop>{DAV:}displayname</D:prop>', response.content)
 
     def test_allowed_object(self):
         v = DavView()

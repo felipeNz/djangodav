@@ -75,7 +75,8 @@ Removed redundant request handler.
 
 Added FSResource and DBResource to provide file system and data base access.
 
-Xml library usage is replaced with lxml to achieve proper xml generation code readability.
+XML parsing uses defusedxml, and XML responses are generated with Python's standard
+ElementTree library.
 
 
 Known Issues / Limitations

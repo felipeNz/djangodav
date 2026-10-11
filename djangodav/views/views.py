@@ -11,10 +11,7 @@ except ImportError:
     # Python 3
     from urllib import parse as urlparse
 
-# import lxml xml parser
-from lxml import etree
-# use defusedxmls parse function
-from defusedxml.lxml import parse
+from defusedxml.ElementTree import parse
 
 from django.conf import settings
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, HttpResponseBadRequest, \
@@ -30,7 +27,8 @@ from django.views.generic import TemplateView
 from djangodav.responses import HttpResponsePreconditionFailed, HttpResponseCreated, HttpResponseNoContent, \
     HttpResponseConflict, HttpResponseMediatypeNotSupported, HttpResponseBadGateway, HttpResponseMultiStatus, \
     HttpResponseLocked, ResponseException
-from djangodav.utils import WEBDAV_NSMAP, D, url_join, get_property_tag_list, rfc1123_date, rfc5987_content_disposition
+from djangodav.utils import D, url_join, get_property_tag_list, rfc1123_date, \
+    rfc5987_content_disposition, serialize_xml, local_name, findall_dav, find_dav
 
 
 PATTERN_IF_DELIMITER = re.compile(r'(<([^>]+)>)|(\(([^\)]+)\))')
@@ -82,10 +80,7 @@ class DavView(TemplateView):
             and int(meta('CONTENT_LENGTH', 0)) > 0):
 
             # parse XML using defusedxmls parse function
-            self.xbody = kwargs['xbody'] = etree.XPathDocumentEvaluator(
-                parse(request, etree.XMLParser(ns_clean=True, resolve_entities=True)),
-                namespaces=WEBDAV_NSMAP
-            )
+            self.xbody = kwargs['xbody'] = parse(request).getroot()
 
         if request.method.upper() in self._allowed_methods():
             handler = getattr(self, request.method.lower(), self.http_method_not_allowed)
@@ -465,29 +460,22 @@ class DavView(TemplateView):
             return HttpResponseBadRequest('Wrong timeout')
 
         owner = None
-        try:
-            owner_obj = xbody('/D:lockinfo/D:owner')[0]  # TODO: WEBDAV_NS
-        except IndexError:
-            owner_obj = None
-        else:
+        owner_obj = find_dav(xbody, 'D:lockinfo/D:owner')
+        if owner_obj is not None:
             if owner_obj.text:
                 owner = owner_obj.text
             if len(owner_obj):
                 owner = owner_obj[0].text
 
-        try:
-            lockscope_obj = xbody('/D:lockinfo/D:lockscope/*')[0] # TODO: WEBDAV_NS
-        except IndexError:
+        lockscope_obj = find_dav(xbody, 'D:lockinfo/D:lockscope/*')
+        if lockscope_obj is None:
             return HttpResponseBadRequest('Lock scope required')
-        else:
-            lockscope = lockscope_obj.xpath('local-name()')
+        lockscope = local_name(lockscope_obj)
 
-        try:
-            locktype_obj = xbody('/D:lockinfo/D:locktype/*')[0] # TODO: WEBDAV_NS
-        except IndexError:
+        locktype_obj = find_dav(xbody, 'D:lockinfo/D:locktype/*')
+        if locktype_obj is None:
             return HttpResponseBadRequest('Lock type required')
-        else:
-            locktype = locktype_obj.xpath('local-name()')
+        locktype = local_name(locktype_obj)
 
         token = self.lock_class(self.resource).acquire(lockscope, locktype, depth, timeout, owner)
         if not token:
@@ -527,9 +515,9 @@ class DavView(TemplateView):
 
         get_all_props, get_prop, get_prop_names = True, False, False
         if xbody:
-            get_prop = [p.xpath('local-name()') for p in xbody('/D:propfind/D:prop/*')]
-            get_all_props = xbody('/D:propfind/D:allprop')
-            get_prop_names = xbody('/D:propfind/D:propname')
+            get_prop = [local_name(p) for p in findall_dav(xbody, 'D:propfind/D:prop/*')]
+            get_all_props = findall_dav(xbody, 'D:propfind/D:allprop')
+            get_prop_names = findall_dav(xbody, 'D:propfind/D:propname')
             if int(bool(get_prop)) + int(bool(get_all_props)) + int(bool(get_prop_names)) != 1:
                 return HttpResponseBadRequest()
 
@@ -573,7 +561,7 @@ class DavView(TemplateView):
         depth = self.get_depth(default="0")
         if depth != 0:
             return HttpResponseBadRequest('Invalid depth header value %s' % depth)
-        props = xbody('/D:propertyupdate/D:set/D:prop/*')
+        props = findall_dav(xbody, 'D:propertyupdate/D:set/D:prop/*')
         body = D.multistatus(
             D.response(
                 D.href(url_join(self.base_url, self.resource.get_escaped_path())),
@@ -587,12 +575,7 @@ class DavView(TemplateView):
 
     def build_xml_response(self, tree=None, response_class=HttpResponse, **kwargs):
         if tree is not None:
-            content = etree.tostring(
-                tree,
-                xml_declaration=True,
-                pretty_print=self.xml_pretty_print,
-                encoding=self.xml_encoding
-            )
+            content = serialize_xml(tree, pretty_print=self.xml_pretty_print, encoding=self.xml_encoding)
         else:
             content = b''
         return response_class(

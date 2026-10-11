@@ -39,8 +39,7 @@ try:
 except ImportError:
     from email.Utils import parsedate_tz
 
-# ToDo: do not use lxml, use defusedxml to avoid XML vulnerabilities
-import lxml.builder as lb
+from xml.etree import ElementTree
 
 # Sun, 06 Nov 1994 08:49:37 GMT  ; RFC 822, updated by RFC 1123
 FORMAT_RFC_822 = '%a, %d %b %Y %H:%M:%S GMT'
@@ -53,7 +52,58 @@ WEBDAV_NS = "DAV:"
 
 WEBDAV_NSMAP = {'D': WEBDAV_NS}
 
-D = lb.ElementMaker(namespace=WEBDAV_NS, nsmap=WEBDAV_NSMAP)
+ElementTree.register_namespace('D', WEBDAV_NS)
+
+
+class DavElementFactory:
+    def __call__(self, name, *content):
+        tag = name if name.startswith('{') else '{%s}%s' % (WEBDAV_NS, name)
+        element = ElementTree.Element(tag)
+        for item in content:
+            if callable(item) and hasattr(item, '_dav_tag'):
+                item = self(item._dav_tag)
+            if isinstance(item, ElementTree.Element):
+                element.append(item)
+            elif item is not None:
+                text = str(item)
+                if len(element):
+                    element[-1].tail = (element[-1].tail or '') + text
+                else:
+                    element.text = (element.text or '') + text
+        return element
+
+    def __getattr__(self, name):
+        def constructor(*content):
+            return self(name, *content)
+
+        constructor._dav_tag = name
+        return constructor
+
+
+D = DavElementFactory()
+
+
+def serialize_xml(element, pretty_print=False, encoding='utf-8'):
+    if pretty_print:
+        ElementTree.indent(element)
+    return ElementTree.tostring(element, encoding=encoding, xml_declaration=True)
+
+
+def local_name(element):
+    return element.tag.rsplit('}', 1)[-1]
+
+
+def findall_dav(element, path):
+    parts = path.split('/')
+    root_name = parts[0].split(':', 1)[-1]
+    if element.tag == '{%s}%s' % (WEBDAV_NS, root_name):
+        parts = parts[1:]
+    return element.findall('/'.join(parts), WEBDAV_NSMAP)
+
+
+def find_dav(element, path):
+    matches = findall_dav(element, path)
+    return matches[0] if matches else None
 
 
 def get_property_tag_list(res, *names):
