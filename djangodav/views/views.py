@@ -2,17 +2,10 @@ import os
 import re
 from collections import OrderedDict
 from xml.etree import ElementTree
+from urllib.parse import quote, unquote, urlparse
 
-# import urllib.parse
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import router, transaction
-
-try:
-    # Python 2.7
-    import urlparse
-except ImportError:
-    # Python 3
-    from urllib import parse as urlparse
 
 from defusedxml.ElementTree import parse
 
@@ -21,8 +14,6 @@ from django.http import HttpResponseForbidden, HttpResponseNotAllowed, HttpRespo
     HttpResponseRedirect, Http404, HttpResponse, FileResponse
 from django.utils.decorators import method_decorator
 from django.utils.functional import cached_property
-#from django.utils.http import urlquote
-from urllib.parse import quote
 from django.utils.timezone import now
 from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import TemplateView
@@ -394,14 +385,14 @@ class DavView(TemplateView):
         if not self.has_access(self.resource, 'read'):
             return self.no_access()
         # need to double unquote the HTTP_DESTINATION header (Windows 7 Compatibility)
-        dst = urlparse.unquote(urlparse.unquote(request.META.get('HTTP_DESTINATION', '')))  # .decode(self.xml_encoding)
+        dst = unquote(unquote(request.META.get('HTTP_DESTINATION', '')))  # .decode(self.xml_encoding)
         if not dst:
             return HttpResponseBadRequest('Destination header missing.')
 
         original_dst = dst
 
-        dparts = urlparse.urlparse(dst)
-        sparts = urlparse.urlparse(request.build_absolute_uri())
+        dparts = urlparse(dst)
+        sparts = urlparse(request.build_absolute_uri())
         if sparts.scheme != dparts.scheme or sparts.hostname != dparts.hostname:
             return HttpResponseBadGateway('Source and destination must have the same scheme and host.')
         # adjust path for our base url:
