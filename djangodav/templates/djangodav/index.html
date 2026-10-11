@@ -42,7 +42,7 @@
         <a href="{{ parent_directory_url }}">Parent Directory</a>
     </td>
 </tr>
-{% for child in resource.get_children %}
+{% for child in children %}
 <tr>
     <td><a href="{{ base_url }}{{ child.get_escaped_path }}">{{ child.displayname }}</a></td>
     <td align="right">{{ child.get_created|date:"d-M-Y H:i" }}</td>

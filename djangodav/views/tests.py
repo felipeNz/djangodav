@@ -68,6 +68,8 @@ class TestView(TestCase):
             path='/collection/',
             get_descendants=Mock(return_value=[self.sub_object, self.sub_collection])
         )
+        self.top_collection.get_children = Mock(return_value=[self.sub_object, self.sub_collection])
+        self.sub_collection.get_children = Mock(return_value=[])
 
     def test_get_collection_redirect(self):
         actual_path = '/collection/'
@@ -94,7 +96,7 @@ class TestView(TestCase):
         r = DavView(path=path, acl_class=FullAcl)
         r.__dict__['resource'] = MissingMockCollection(path)
         request = Mock(META={'SERVERNANE': 'testserver'}, build_absolute_uri=Mock(return_value=path))
-        self.assertRaises(Http404, r.get, request, path, 'xbody')
+        self.assertRaises(Http404, r.get, request, path)
 
     def test_propfind_listing(self):
         self.top_collection.get_descendants.return_value += [self.top_collection]
@@ -248,7 +250,7 @@ class TestView(TestCase):
                 'CONTENT_LENGTH': '44'
             },
             method='GET',
-            read=Mock(side_effect=["<?xml version=\"1.0\" encoding=\"utf-8\"?>\n", "<foo/>", ""])
+            read=Mock(return_value=b"<foo/>")
         )
         v = DavView(request=request, get=Mock(return_value=HttpResponse()), _allowed_methods=Mock(return_value=['GET']))
         v.dispatch(request, '/path/')
@@ -270,8 +272,7 @@ class TestView(TestCase):
         )
         view = DavView(request=request, _allowed_methods=Mock(return_value=['PROPFIND']))
 
-        with self.assertRaises(EntitiesForbidden):
-            view.dispatch(request, '/path/')
+        self.assertEqual(view.dispatch(request, '/path/').status_code, 400)
 
     def test_lock_parses_dav_xml(self):
         request = Mock(META={'HTTP_DEPTH': '0', 'HTTP_LOCK_TIMEOUT': 'Seconds-600'})
@@ -503,8 +504,8 @@ class TestView(TestCase):
         v.__dict__['resource'] = MockObject(path)
         resp = v.options(None, path)
         self.assertEqual(sorted(resp.items()), [
+            ('Accept-Ranges', 'bytes'),
             ('Allow', 'ALL'),
-            ('Allow-Ranges', 'bytes'),
             ('Content-Length', '0'),
             ('Content-Type', 'text/xml; charset="utf-8"'),
             ('DAV', '1,2'),
@@ -526,22 +527,22 @@ class TestView(TestCase):
         path = '/obj.txt'
         v = DavView(path=path, _allowed_methods=Mock(return_value=['ALL']), acl_class=FullAcl)
         v.__dict__['resource'] = MockObject(path, read=Mock(return_value="C" * 42))
-        resp = v.get(None, path, acl_class=FullAcl)
+        resp = v.get(HttpRequest(), path, acl_class=FullAcl)
         self.assertEqual(resp['Etag'], "0" * 40)
         self.assertEqual(resp['Content-Type'], "text/plain")
         self.assertEqual(resp['Last-Modified'], "Wed, 24 Dec 2014 06:00:00 +0000")
-        self.assertEqual(resp.content, "C" * 42)
+        self.assertEqual(b"".join(resp.streaming_content), b"C" * 42)
 
     @patch('django.views.generic.TemplateView.get', Mock(return_value=HttpResponse('listing')))
     def test_head_object(self):
         path = '/object.txt'
         v = DavView(path=path, base_url='/base', _allowed_methods=Mock(return_value=['ALL']), acl_class=FullAcl)
         v.__dict__['resource'] = MockObject(path)
-        resp = v.head(None, path)
+        resp = v.head(HttpRequest(), path)
         self.assertEqual("text/plain", resp['Content-Type'])
         self.assertEqual("Wed, 24 Dec 2014 06:00:00 +0000", resp['Last-Modified'])
-        self.assertEqual("", resp.content)
-        self.assertEqual("0", resp['Content-Length'])
+        self.assertEqual(b"", b"".join(resp.streaming_content))
+        self.assertEqual("42", resp['Content-Length'])
 
     @patch('django.views.generic.TemplateView.get', Mock(return_value=HttpResponse('listing')))
     def test_get_collection(self):
@@ -549,15 +550,15 @@ class TestView(TestCase):
         v = DavView(path=path, acl_class=FullAcl, base_url='/base', _allowed_methods=Mock(return_value=['ALL']))
         v.__dict__['resource'] = MockCollection(path)
         resp = v.get(None, path)
-        self.assertEqual("listing", resp.content)
+        self.assertEqual(b"listing", resp.content)
         self.assertEqual("Wed, 24 Dec 2014 06:00:00 +0000", resp['Last-Modified'])
 
     def test_head_collection(self):
         path = '/collection/'
         v = DavView(path=path, acl_class=FullAcl, base_url='/base', _allowed_methods=Mock(return_value=['ALL']))
         v.__dict__['resource'] = MockCollection(path)
-        resp = v.head(None, path)
-        self.assertEqual("", resp.content)
+        resp = v.head(HttpRequest(), path)
+        self.assertEqual(b"", b"".join(resp.streaming_content))
         self.assertEqual("Wed, 24 Dec 2014 06:00:00 +0000", resp['Last-Modified'])
         self.assertEqual("0", resp['Content-Length'])
 
@@ -568,7 +569,7 @@ class TestView(TestCase):
         self.missing_sub_object.write = Mock()
         request = HttpRequest()
         resp = v.put(request, path)
-        self.missing_sub_object.write.assert_called_with(request)
+        self.missing_sub_object.write.assert_called_with(request, range_start=None)
         self.assertEqual(201, resp.status_code)
 
     def test_put_exists(self):
@@ -578,7 +579,7 @@ class TestView(TestCase):
         self.sub_object.write = Mock()
         request = HttpRequest()
         resp = v.put(request, path)
-        self.sub_object.write.assert_called_with(request)
+        self.sub_object.write.assert_called_with(request, range_start=None)
         self.assertEqual(204, resp.status_code)
 
     def test_put_collection(self):
@@ -649,7 +650,7 @@ class TestView(TestCase):
         request.META['SERVER_NAME'] = 'testserver'
         request.META['SERVER_PORT'] = '80'
         request.META['HTTP_DEPTH'] = 'infinity'
-        v = DavView(base_url='http://testserver', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
+        v = DavView(base_url='/', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
         v.resource_class = Mock(return_value=dst)
         v.__dict__['resource'] = src
         resp = v.copy(request, src.get_path(), None)
@@ -666,7 +667,7 @@ class TestView(TestCase):
         request.META['SERVER_NAME'] = 'testserver'
         request.META['SERVER_PORT'] = '80'
         request.META['HTTP_DEPTH'] = 'infinity'
-        v = DavView(base_url='http://testserver', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
+        v = DavView(base_url='/', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
         v.resource_class = Mock(return_value=dst)
         v.__dict__['resource'] = src
         resp = v.copy(request, src.get_path(), None)
@@ -683,7 +684,7 @@ class TestView(TestCase):
         request.META['HTTP_DESTINATION'] = "http://testserver%s" % dst.get_escaped_path()
         request.META['SERVER_NAME'] = 'testserver'
         request.META['SERVER_PORT'] = '80'
-        v = DavView(base_url='http://testserver', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
+        v = DavView(base_url='/', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
         v.resource_class = Mock(return_value=dst)
         v.__dict__['resource'] = src
         resp = v.move(request, src.get_path(), None)
@@ -700,7 +701,7 @@ class TestView(TestCase):
         request.META['HTTP_DESTINATION'] = "http://testserver%s" % dst.get_escaped_path()
         request.META['SERVER_NAME'] = 'testserver'
         request.META['SERVER_PORT'] = '80'
-        v = DavView(base_url='http://testserver', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
+        v = DavView(base_url='/', request=request, path=src.get_path(), acl_class=FullAcl, resource_class=Mock(), lock_class=DummyLock)
         v.resource_class = Mock(return_value=dst)
         v.__dict__['resource'] = src
         resp = v.move(request, src.get_path(), None)

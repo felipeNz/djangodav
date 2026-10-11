@@ -29,6 +29,7 @@ from djangodav.responses import HttpResponseUnAuthorized
 try:
     import rest_framework
     from rest_framework.exceptions import APIException
+    from rest_framework.authentication import SessionAuthentication
 except ImportError:
     rest_framework = None
 
@@ -47,6 +48,7 @@ class RestAuthViewMixIn(object):
     @method_decorator(csrf_exempt)
     def dispatch(self, request, *args, **kwargs):
         assert rest_framework is not None, "django rest framework is not installed."
+        request._dav_non_session_auth = False
         if request.method.lower() != 'options':
             user_auth_tuple = None
             for auth in self.authentications:
@@ -58,6 +60,7 @@ class RestAuthViewMixIn(object):
                     if user_auth_tuple is None:
                         continue # try next authenticator 
                     else:
+                        authenticator = auth
                         break    # we got auth, so stop trying
 
             if user_auth_tuple is not None:
@@ -69,4 +72,5 @@ class RestAuthViewMixIn(object):
 
             request.user = user
             request.auth = auth
+            request._dav_non_session_auth = not isinstance(authenticator, SessionAuthentication)
         return super(RestAuthViewMixIn, self).dispatch(request, *args, **kwargs)

@@ -25,6 +25,7 @@ import datetime
 import os
 import shutil
 from sys import getfilesystemencoding
+from django.core.exceptions import PermissionDenied
 
 from djangodav.base.resources import BaseDavResource
 from djangodav.utils import url_join
@@ -44,7 +45,28 @@ class BaseFSDavResource(BaseDavResource):
         """Return the absolute path of the resource. Used internally to interface with
         an actual file system. If you override all other methods, this one will not
         be used."""
-        return os.path.join(self.root, *self.path)
+        root = os.path.realpath(self.root)
+        for part in self.path:
+            if (part in ('.', '..') or any(c in part for c in ('\\', ':', '\x00'))
+                    or part.endswith((' ', '.'))):
+                raise PermissionDenied('Invalid resource path')
+            if os.name == 'nt' and os.path.isreserved(part):
+                raise PermissionDenied('Reserved resource path')
+        path = os.path.join(root, *self.path)
+        resolved = os.path.realpath(path)
+        try:
+            contained = os.path.commonpath((root, resolved)) == root
+        except ValueError:
+            contained = False
+        if not contained:
+            raise PermissionDenied('Resource outside DAV root')
+        # Reject links within the root too: directory links can form cycles.
+        current = root
+        for part in self.path:
+            current = os.path.join(current, part)
+            if os.path.islink(current) or os.path.isjunction(current):
+                raise PermissionDenied('Linked resources are not supported')
+        return path
 
     @property
     def getcontentlength(self):

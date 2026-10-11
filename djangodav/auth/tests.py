@@ -97,7 +97,7 @@ class RestAuthTest(TestCase):
         self.assertIsNotAuthorized(response)
 
         # get with basic authentication goes through
-        request = RequestFactory().get('/', **{'HTTP_AUTHORIZATION': 'Basic %s' % b64encode('root:test')})
+        request = RequestFactory().get('/', **{'HTTP_AUTHORIZATION': 'Basic %s' % b64encode(b'root:test').decode('ascii')})
         response = v(request, '/')
         self.assertIsAuthorized(response)
     
@@ -122,6 +122,6 @@ class RestAuthTest(TestCase):
         self.assertIsAuthorized(response)    
     
         # get with basic authentication goes through
-        request = RequestFactory().get('/', **{'HTTP_AUTHORIZATION': 'Basic %s' % b64encode('root:test')})
+        request = RequestFactory().get('/', **{'HTTP_AUTHORIZATION': 'Basic %s' % b64encode(b'root:test').decode('ascii')})
         response = v(request, '/')
         self.assertIsAuthorized(response)

@@ -201,10 +201,12 @@ def rfc5987_content_disposition(file_name, disposition_type="attachment"):
     :param disposition_type: either "attachment" or "inline"
     :return:
     """
+    file_name = ''.join(c for c in file_name if ord(c) >= 32 and ord(c) != 127)
     ascii_name = unicodedata.normalize('NFKD', file_name).encode('ascii', 'ignore').decode()
+    ascii_name = ascii_name.replace('\\', '\\\\').replace('"', '\\"')
     header = '{}; filename="{}"'.format(disposition_type, ascii_name)
     if ascii_name != file_name:
-        quoted_name = quote(file_name)
+        quoted_name = quote(file_name, safe='')
         header += '; filename*=UTF-8\'\'{}'.format(quoted_name)
 
     return header

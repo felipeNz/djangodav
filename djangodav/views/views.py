@@ -1,13 +1,16 @@
 import os
 import re
 from collections import OrderedDict
+from io import BytesIO
 from xml.etree import ElementTree
 from urllib.parse import quote, unquote, urlparse
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import router, transaction
 
-from defusedxml.ElementTree import parse
+from defusedxml.ElementTree import parse, fromstring
+from defusedxml.common import DefusedXmlException
+from django.middleware.csrf import CsrfViewMiddleware
 
 from django.conf import settings
 from django.http import HttpResponseForbidden, HttpResponseNotAllowed, HttpResponseBadRequest, \
@@ -27,7 +30,7 @@ from djangodav.utils import D, WEBDAV_NS, url_join, get_property_tag_list, rfc11
 
 
 PATTERN_IF_DELIMITER = re.compile(r'(<([^>]+)>)|(\(([^\)]+)\))')
-PATTERN_CONTENT_RANGE=re.compile('^\s*bytes\s*([0-9]*)-.*$')
+PATTERN_CONTENT_RANGE=re.compile(r'^\s*bytes\s*([0-9]+)-.*$')
 # get settings
 DJANGODAV_X_REDIRECT = getattr(settings, 'DJANGODAV_X_REDIRECT', None)
 DJANGODAV_X_REDIRECT_PREFIX = getattr(settings, 'DJANGODAV_X_REDIRECT_PREFIX', "")
@@ -61,6 +64,12 @@ class DavView(TemplateView):
         :param kwargs:
         :return:
         """
+        if (getattr(getattr(request, 'user', None), 'is_authenticated', False)
+                and not getattr(request, '_dav_non_session_auth', False)):
+            rejection = CsrfViewMiddleware(lambda r: HttpResponse()).process_view(
+                request, lambda r: HttpResponse(), (), {})
+            if rejection is not None:
+                return rejection
         if path:
             self.path = path
             self.base_url = request.META['PATH_INFO'][:-len(self.path)]
@@ -70,13 +79,24 @@ class DavView(TemplateView):
 
         meta = request.META.get
         self.xbody = kwargs['xbody'] = None
-        if (request.method.lower() != 'put'
-            and "/xml" in meta('CONTENT_TYPE', '')
-            and meta('CONTENT_LENGTH', 0) != ''
-            and int(meta('CONTENT_LENGTH', 0)) > 0):
-
-            # parse XML using defusedxmls parse function
-            self.xbody = kwargs['xbody'] = parse(request).getroot()
+        try:
+            length = int(meta('CONTENT_LENGTH', 0) or 0)
+            if length < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return HttpResponseBadRequest('Invalid Content-Length')
+        if request.method.lower() != 'put' and 'xml' in meta('CONTENT_TYPE', '').lower():
+            limit = getattr(settings, 'DJANGODAV_MAX_XML_BYTES', 1024 * 1024)
+            if length > limit:
+                return HttpResponse(status=413)
+            body = request.read(limit + 1)
+            if len(body) > limit:
+                return HttpResponse(status=413)
+            if body:
+                try:
+                    self.xbody = kwargs['xbody'] = parse(BytesIO(body), forbid_dtd=True).getroot()
+                except (ElementTree.ParseError, DefusedXmlException):
+                    return HttpResponseBadRequest('Invalid XML')
 
         if request.method.upper() in self._allowed_methods():
             handler = getattr(self, request.method.lower(), self.http_method_not_allowed)
@@ -85,13 +105,10 @@ class DavView(TemplateView):
         try:
             resp = handler(request, self.path, *args, **kwargs)
         except ResponseException as e:
-            print(e)
             resp = e.response
         except PermissionDenied as pe:
-            print(pe)
             resp = HttpResponseForbidden()
         except ValidationError as ve:
-            print(ve)
             resp = HttpResponseBadRequest()
 
         if not 'Allow' in resp:
@@ -134,6 +151,32 @@ class DavView(TemplateView):
     def has_access(self, resource, method):
         return getattr(self.get_access(resource), method)
 
+    def readable_descendants(self, resource, depth):
+        """Do not traverse collections the caller cannot read."""
+        pending = [(iter((resource,)), depth)]
+        parents = []
+        count = 0
+        limit = getattr(settings, 'DJANGODAV_MAX_PROPFIND_RESOURCES', 10000)
+        while pending:
+            iterator, remaining = pending[-1]
+            try:
+                child = next(iterator)
+            except StopIteration:
+                pending.pop()
+                if parents:
+                    yield parents.pop()
+                continue
+            count += 1
+            if count > limit:
+                raise ResponseException(HttpResponse(status=507))
+            if not self.has_access(child, 'read'):
+                continue
+            if remaining != 0 and child.is_collection:
+                parents.append(child)
+                pending.append((iter(child.get_children()), remaining - 1))
+            else:
+                yield child
+
     def get_resource_kwargs(self, **kwargs):
         return kwargs
 
@@ -153,7 +196,7 @@ class DavView(TemplateView):
         )
         alias = router.db_for_read(DeadProperty)
         return {
-            prop.name: ElementTree.fromstring(prop.value)
+            prop.name: fromstring(prop.value, forbid_dtd=True)
             for prop in DeadProperty.objects.using(alias).filter(resource_key=resource_key)
         }
 
@@ -174,6 +217,8 @@ class DavView(TemplateView):
         context = super(DavView, self).get_context_data(**kwargs)
         context['resource'] = self.resource
         context['base_url'] = self.base_url
+        context['children'] = [child for child in self.resource.get_children()
+                               if self.has_access(child, 'read')]
         # build parent directory according to the current request
         context['parent_directory_url'] = self.request.build_absolute_uri("/".join(self.request.path.rstrip('/').split('/')[:-1]))
         return context
@@ -193,6 +238,8 @@ class DavView(TemplateView):
         :param kwargs:
         :return:
         """
+        if not self.has_access(self.resource, 'read'):
+            return self.no_access()
         if not self.resource.exists:
             # Resource does not exist
             if head:
@@ -219,6 +266,8 @@ class DavView(TemplateView):
         if self.resource.is_object:
             # is an object
             response['Content-Type'] = self.resource.content_type
+            response['Content-Disposition'] = rfc5987_content_disposition(self.resource.displayname)
+            response['X-Content-Type-Options'] = 'nosniff'
             response['ETag'] = self.resource.etag
             response['Content-Length'] = self.resource.getcontentlength
             response['Accept-Ranges'] = 'bytes'
@@ -237,15 +286,12 @@ class DavView(TemplateView):
                     response = HttpResponse()
 
                     # get the path to the requested file
-                    current_path_to_file = self.resource.read().name
-
-                    # make sure the path is relative
-                    if current_path_to_file.startswith("/"):
-                        # absolute path - convert it into a path relative to the resources root path
-                        relpath = os.path.relpath(self.resource.read().name, self.resource.root)
-                    else:
-                        # it's already a relative path, everything is fine
-                        relpath = self.resource.read().name
+                    with self.resource.read() as source_file:
+                        current_path_to_file = source_file.name
+                    relpath = os.path.relpath(current_path_to_file, self.resource.root)
+                    if relpath == os.pardir or relpath.startswith(os.pardir + os.sep):
+                        raise PermissionDenied('Redirect outside DAV root')
+                    relpath = relpath.replace(os.sep, '/')
 
                     # we are not allowed to send utf8 headers, so we need to make sure to quote it
                     response['X-Accel-Redirect'] = quote(
@@ -255,6 +301,7 @@ class DavView(TemplateView):
                     # set the display name as the content disposition header, acting as the download name of the file
                     response['Content-Disposition'] = rfc5987_content_disposition(self.resource.displayname)
                     response['Content-Type'] = self.resource.content_type
+                    response['X-Content-Type-Options'] = 'nosniff'
 
                     # Unfortunately, setting content-length, last-modified and etag does not work with nginx, as those
                     # are overwritten by nginx, see https://forum.nginx.org/read.php?2,205636,205665#msg-205665
@@ -317,6 +364,8 @@ class DavView(TemplateView):
         else:
             m=PATTERN_CONTENT_RANGE.match(range)
             if not m: return HttpResponseBadRequest("Invalid Content-Range")
+            if not m[1]:
+                return HttpResponseBadRequest('Invalid Content-Range')
             range_start=int(m[1])
             
         self.resource.write(request, range_start=range_start)
@@ -336,10 +385,15 @@ class DavView(TemplateView):
         :param kwargs:
         :return:
         """
+        if self.resource.is_root:
+            return HttpResponseForbidden('Cannot delete DAV root')
         if not self.resource.exists:
             raise Http404("Resource doesn't exists")
         if not self.has_access(self.resource, 'delete'):
             return self.no_access()
+        for child in self.resource.get_descendants(depth=-1):
+            if not self.has_access(child, 'delete'):
+                return self.no_access()
         self.lock_class(self.resource).del_locks()
         self.resource.delete()
         response = HttpResponseNoContent()
@@ -362,7 +416,7 @@ class DavView(TemplateView):
         length = request.META.get('CONTENT_LENGTH', 0)
         if length and int(length) != 0:
             return HttpResponseMediatypeNotSupported()
-        if not self.has_access(self.resource, 'write'):
+        if not self.has_access(self.resource.get_parent(), 'write'):
             return self.no_access()
         self.resource.create_collection()
         self.__dict__['resource'] = self.get_resource(path=self.resource.get_path())
@@ -393,14 +447,41 @@ class DavView(TemplateView):
 
         dparts = urlparse(dst)
         sparts = urlparse(request.build_absolute_uri())
-        if sparts.scheme != dparts.scheme or sparts.hostname != dparts.hostname:
+        if (sparts.scheme != dparts.scheme or sparts.netloc != dparts.netloc):
             return HttpResponseBadGateway('Source and destination must have the same scheme and host.')
+        if (not dparts.path.startswith(self.base_url.rstrip('/') + '/')
+                or dparts.query or dparts.fragment):
+            return HttpResponseBadRequest('Destination outside DAV mount')
         # adjust path for our base url:
         dst = self.get_resource(path=dparts.path[len(self.base_url):])
+        source_path = self.resource.get_path().rstrip('/')
+        destination_path = dst.get_path().rstrip('/')
+        if (source_path == destination_path
+                or destination_path.startswith(source_path + '/')
+                or source_path.startswith(destination_path + '/')):
+            return HttpResponseForbidden('Source and destination overlap')
         if not dst.get_parent().exists:
             return HttpResponseConflict()
         if not self.has_access(self.resource, 'write'):
             return self.no_access()
+        if not self.has_access(dst.get_parent(), 'write'):
+            return self.no_access()
+        if dst.exists and (not self.has_access(dst, 'write') or not self.has_access(dst, 'delete')):
+            return self.no_access()
+        # Preflight the entire operation before any resource is changed.
+        for child in self.resource.get_descendants(depth=kwargs.get('depth', -1)):
+            if not self.has_access(child, 'read'):
+                return self.no_access()
+            if method == 'move' and not self.has_access(child, 'delete'):
+                return self.no_access()
+            relative = child.get_path().rstrip('/')[len(source_path):]
+            target = self.get_resource(path=destination_path + relative)
+            if not self.has_access(target, 'write'):
+                return self.no_access()
+        if dst.exists:
+            for child in dst.get_descendants(depth=-1):
+                if not self.has_access(child, 'delete'):
+                    return self.no_access()
         overwrite = request.META.get('HTTP_OVERWRITE', 'T')
         if overwrite not in ('T', 'F'):
             return HttpResponseBadRequest('Overwrite header must be T or F.')
@@ -436,8 +517,6 @@ class DavView(TemplateView):
         # if depth != -1:
         #     print("canceling because depth=", depth)
         #     return HttpResponseBadRequest()
-
-        print("Copying {} located at {} to ...".format(self.resource.displayname, path))
 
         return self.relocate(request, path, 'copy', depth=depth)
 
@@ -533,10 +612,15 @@ class DavView(TemplateView):
             if int(bool(get_prop)) + int(bool(get_all_props)) + int(bool(get_prop_names)) != 1:
                 return HttpResponseBadRequest()
 
-        children = self.resource.get_descendants(depth=self.get_depth())
+        depth = self.get_depth()
+        if depth == -1 and not getattr(settings, 'DJANGODAV_ALLOW_INFINITE_PROPFIND', False):
+            return HttpResponseForbidden('Infinite PROPFIND depth is disabled')
+        children = self.readable_descendants(self.resource, depth)
 
         responses = []
         for child in children:
+            if not self.has_access(child, 'read'):
+                continue
             dead_properties = self.get_dead_properties(child)
             live_names = ['{%s}%s' % (WEBDAV_NS, name) for name in child.ALL_PROPS]
             requested_names = get_prop if get_prop else live_names + list(dead_properties)

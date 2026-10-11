@@ -24,6 +24,7 @@
 *.pyc
 __pycache__
 env
+.venv/
 .idea
 .eggs
 *.egg-info

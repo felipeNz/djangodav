@@ -5,5 +5,5 @@ python:
   - "3.14"
 env:
   - DJANGO_VERSION=6.1
-install: pip install -q Django==$DJANGO_VERSION "djangorestframework>=3.16"
+install: pip install -q -r requirements.txt
 script: python runtests.py

@@ -50,8 +50,8 @@ setup(
         'Topic :: Software Development :: Libraries :: Python Modules'
     ],
     python_requires=">=3.12",
-    install_requires=["Django>=6.1,<7.0", "defusedxml"],
-    tests_require=["Django>=6.1,<7.0"],
+    install_requires=["Django>=6.1.2,<7.0", "defusedxml>=0.7.1"],
+    tests_require=["Django>=6.1.2,<7.0"],
     include_package_data=True,
     zip_safe=False,
     test_suite='runtests.runtests'
