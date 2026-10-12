@@ -22,5 +22,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION = (0, 0, 1, 'beta', 27)
-__version__ = "0.0.1b27"
+VERSION = (0, 0, 1, 'beta', 28)
+
+_suffix = {'alpha': 'a', 'beta': 'b', 'rc': 'rc', 'final': ''}
+__version__ = '.'.join(map(str, VERSION[:3]))
+if VERSION[3] != 'final':
+    __version__ += f'{_suffix[VERSION[3]]}{VERSION[4]}'

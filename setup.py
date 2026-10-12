@@ -34,7 +34,9 @@ setup(
     long_description = open('README.rst').read(),
     author='Christian Kreuzberger',
     author_email='ckreuzberger@anexia-it.com',
-    url='https://github.com/anx-ckreuzberger/djangodav',
+    maintainer='Phillip Le Leu',
+    maintainer_email='pleleu@gmail.com',
+    url='https://github.com/felipeNz/djangodav',
     packages=find_packages(),
     classifiers=[
         'Development Status :: 4 - Beta',
