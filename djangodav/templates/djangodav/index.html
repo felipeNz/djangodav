@@ -23,35 +23,135 @@
  You should have received a copy of the GNU Affero General Public License
  along with DjangoDav.  If not, see <http://www.gnu.org/licenses/>.
 {% endcomment %}
-<html>
-<head></head>
-
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ resource.get_path|default:"/" }} ? DjangoDav</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+    <style>
+        :root { --directory-accent: #4f46e5; }
+        body { background: #f5f6fa; color: #242b3d; }
+        .directory-shell { max-width: 1120px; }
+        .brand-mark { background: var(--directory-accent); color: white; border-radius: .8rem; padding: .65rem; }
+        .directory-icon { width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
+        .file-icon { width: 2.6rem; height: 2.6rem; border-radius: .7rem; display: inline-flex; align-items: center; justify-content: center; background: #eef0ff; color: var(--directory-accent); flex-shrink: 0; }
+        .folder-icon { background: #fff5df; color: #9a6700; }
+        .directory-card { border: 1px solid #e8eaf1; border-radius: 1rem; overflow: hidden; box-shadow: 0 8px 32px #242b3d06; }
+        .table { --bs-table-bg: transparent; --bs-table-hover-bg: #f7f8ff; }
+        .table th { background: #fafbfe; color: #697386; font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
+        .table td, .table th { padding: 1rem 1.25rem; }
+        .file-link { color: #242b3d; text-decoration: none; overflow-wrap: anywhere; }
+        .file-link:hover { color: var(--directory-accent); }
+        .file-link:focus-visible { outline: 2px solid var(--directory-accent); outline-offset: 4px; border-radius: .25rem; }
+        .path-label { overflow-wrap: anywhere; }
+        .search-field { max-width: 320px; }
+        [hidden] { display: none !important; }
+        @media (max-width: 575.98px) {
+            .table td, .table th { padding: .85rem .75rem; }
+            .search-field { max-width: none; }
+        }
+    </style>
+</head>
 <body>
-<h1>Index of {{ resource.get_displaypath }}</h1>
-<table>
-<tr>
-    <th>Name</th>
-    <th>Created</th>
-    <th>Last modified</th>
-    <th>Size</th>
-</tr>
-<tr><th colspan="4"><hr></th></tr>
-<tr>
-    <td colspan="4">
-        {# link to parent directory #}
-        <a href="{{ parent_directory_url }}">Parent Directory</a>
-    </td>
-</tr>
-{% for child in children %}
-<tr>
-    <td><a href="{{ base_url }}{{ child.get_escaped_path }}">{{ child.displayname }}</a></td>
-    <td align="right">{{ child.get_created|date:"d-M-Y H:i" }}</td>
-    <td align="right">{{ child.get_modified|date:"d-M-Y H:i" }}</td>
-    <td align="right">{{ child.getcontentlength|filesizeformat }}</td>
-</tr>
-{% endfor %}
-<tr><th colspan="4"><hr></th></tr>
-</table>
-<p>Powered by DjangoDav - <a href="https://github.com/anx-ckreuzberger/djangodav/">https://github.com/anx-ckreuzberger/djangodav/</a></p>
+<svg xmlns="http://www.w3.org/2000/svg" class="d-none" aria-hidden="true">
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Zm8 0v5h4M9 12h6m-6 4h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-up" viewBox="0 0 24 24"><path d="m7 10 5-5 5 5M12 5v14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+</svg>
+<header class="bg-white border-bottom">
+    <div class="container directory-shell d-flex align-items-center gap-3 py-3">
+        <span class="brand-mark"><svg class="directory-icon" aria-hidden="true"><use href="#icon-folder"/></svg></span>
+        <span class="fw-bold fs-5">DjangoDav<span class="d-block fw-normal small text-secondary" style="font-size: .75rem;">Your file directory</span></span>
+        <span class="ms-auto badge rounded-pill text-bg-light border fw-normal px-3 py-2">WebDAV</span>
+    </div>
+</header>
+<main class="container directory-shell py-4 py-md-5">
+    <div class="d-flex flex-wrap align-items-start justify-content-between gap-3 mb-4">
+        <div>
+            <p class="text-secondary small mb-2">File browser</p>
+            <h1 class="h2 fw-bold mb-2">{% if resource.is_root %}All files{% else %}{{ resource.displayname }}{% endif %}</h1>
+            <p class="path-label text-secondary font-monospace small mb-0">{{ resource.get_path|default:"/" }}</p>
+        </div>
+        {% if not resource.is_root %}
+        <a class="btn btn-outline-secondary bg-white d-inline-flex align-items-center gap-2" href="{{ parent_directory_url }}">
+            <svg class="directory-icon" aria-hidden="true"><use href="#icon-up"/></svg>Parent directory
+        </a>
+        {% endif %}
+    </div>
+    <section class="directory-card bg-white" aria-label="Directory contents">
+        <div class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-3 p-3 p-md-4 border-bottom">
+            <div class="d-flex align-items-center gap-2">
+                <h2 class="h6 fw-semibold mb-0">Directory contents</h2>
+                <span class="badge rounded-pill text-bg-light border fw-normal">{{ children|length }} item{{ children|length|pluralize }}</span>
+            </div>
+            <div class="input-group search-field" id="search-controls" hidden>
+                <span class="input-group-text bg-white text-secondary"><svg class="directory-icon" aria-hidden="true"><use href="#icon-search"/></svg></span>
+                <input class="form-control border-start-0 ps-0" type="search" id="file-search" placeholder="Search this directory?" aria-label="Search this directory" aria-controls="directory-table">
+            </div>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0" id="directory-table">
+                <caption class="visually-hidden">Files and folders in {{ resource.get_path|default:"/" }}</caption>
+                <thead><tr>
+                    <th scope="col">Name</th>
+                    <th scope="col" class="d-none d-lg-table-cell">Created</th>
+                    <th scope="col" class="d-none d-md-table-cell">Last modified</th>
+                    <th scope="col" class="text-end">Size</th>
+                </tr></thead>
+                <tbody>
+                {% for child in children %}
+                    <tr data-directory-entry data-name="{{ child.displayname }}">
+                        <td>
+                            <a class="file-link d-flex align-items-center gap-3" href="{{ base_url }}{{ child.get_escaped_path }}">
+                                <span class="file-icon {% if child.is_collection %}folder-icon{% endif %}">
+                                    <svg class="directory-icon" aria-hidden="true"><use href="{% if child.is_collection %}#icon-folder{% else %}#icon-file{% endif %}"/></svg>
+                                </span>
+                                <span><span class="fw-medium">{{ child.displayname }}</span><span class="d-block small text-secondary">{% if child.is_collection %}Folder{% else %}File{% endif %}</span></span>
+                            </a>
+                        </td>
+                        <td class="d-none d-lg-table-cell text-secondary small text-nowrap">{{ child.get_created|date:"d M Y, H:i"|default:"?" }}</td>
+                        <td class="d-none d-md-table-cell text-secondary small text-nowrap">{{ child.get_modified|date:"d M Y, H:i"|default:"?" }}</td>
+                        <td class="text-end text-secondary small text-nowrap">{% if child.is_collection %}?{% else %}{{ child.getcontentlength|filesizeformat }}{% endif %}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="4" class="text-center py-5"><span class="file-icon folder-icon mb-3"><svg class="directory-icon" aria-hidden="true"><use href="#icon-folder"/></svg></span><p class="fw-semibold mb-1">This folder is empty</p><p class="text-secondary small mb-0">Files and folders will appear here.</p></td></tr>
+                {% endfor %}
+                    <tr id="no-results" hidden><td colspan="4" class="text-center py-5"><p class="fw-semibold mb-1">No matching files</p><p class="text-secondary small mb-0">Try a different name or clear your search.</p></td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="border-top px-3 px-md-4 py-3 small text-secondary" id="directory-status" role="status" aria-live="polite">{{ children|length }} item{{ children|length|pluralize }} in this directory</div>
+    </section>
+    <footer class="d-flex flex-wrap justify-content-between gap-2 mt-4 small text-secondary">
+        <span>Browse folders. Select a file to download.</span>
+        <span>Powered by <a class="text-secondary" href="https://github.com/anx-ckreuzberger/djangodav/">DjangoDav</a></span>
+    </footer>
+</main>
+<script>
+    (() => {
+        const entries = Array.from(document.querySelectorAll('[data-directory-entry]'));
+        if (!entries.length) return;
+        document.getElementById('search-controls').hidden = false;
+        const search = document.getElementById('file-search');
+        const status = document.getElementById('directory-status');
+        const noResults = document.getElementById('no-results');
+        search.addEventListener('input', () => {
+            const query = search.value.trim().toLocaleLowerCase();
+            let visible = 0;
+            entries.forEach(entry => {
+                entry.hidden = !entry.dataset.name.toLocaleLowerCase().includes(query);
+                if (!entry.hidden) visible += 1;
+            });
+            noResults.hidden = visible > 0;
+            status.textContent = query
+                ? `${visible} of ${entries.length} items match your search`
+                : `${entries.length} item${entries.length === 1 ? '' : 's'} in this directory`;
+        });
+    })();
+</script>
 </body>
 </html>
